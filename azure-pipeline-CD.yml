@@ -45,17 +45,17 @@ resources:
 
   pipelines:
     - pipeline: webapp-ci
-      project: MyProject
+      project: DBG-ACN
       source: "WebApp-CI"
       branch: main
 
     - pipeline: dataplatform-ci
-      project: MyProject
+      project: DBG-ACN
       source: "DataPlatform-CI"
       branch: main
 
     - pipeline: aiml-ci
-      project: MyProject
+      project: DBG-ACN
       source: "AIML-CI"
       branch: main
 
