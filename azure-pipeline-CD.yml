@@ -40,7 +40,7 @@ resources:
   repositories:
     - repository: coordinator
       type: git
-      name: MyProject/release-coordinator
+      name: DBG-ACN/release-coordinator
       ref: refs/heads/main
 
   pipelines:
@@ -128,7 +128,7 @@ stages:
                   displayName: "Download DataPlatform artifact"
                   inputs:
                     buildType: specific
-                    project: MyProject
+                    project: DBG-ACN
                     definition: $(resources.pipeline.dataplatform-ci.pipelineID)
                     buildVersionToDownload: latestFromBranch
                     branchName: refs/heads/main
@@ -198,7 +198,7 @@ stages:
                   displayName: "Download AIML artifact"
                   inputs:
                     buildType: specific
-                    project: MyProject
+                    project: DBG-ACN
                     definition: $(resources.pipeline.aiml-ci.pipelineID)
                     buildVersionToDownload: latestFromBranch
                     branchName: refs/heads/main
@@ -271,7 +271,7 @@ stages:
                   displayName: "Download WebApp artifact"
                   inputs:
                     buildType: specific
-                    project: MyProject
+                    project: DBG-ACN
                     definition: $(resources.pipeline.webapp-ci.pipelineID)
                     buildVersionToDownload: latestFromBranch
                     branchName: refs/heads/main
