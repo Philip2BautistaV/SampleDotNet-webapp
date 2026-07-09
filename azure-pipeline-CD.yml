@@ -1,156 +1,314 @@
 # =====================================================================
-# CD pipeline: Deploy LGWebApp (drop artifact) to Dev -> Test/UAT -> Prod
+# release-coordinator.yml — converted version
 #
-# Companion to the CI pipeline (azure-pipelines-ci.yml) which builds,
-# publishes, and stages the 'drop' artifact. This pipeline does NOT
-# rebuild anything -- it downloads that artifact and deploys the same
-# binaries through each environment, using Azure DevOps Environments
-# for approval gates between stages.
+# Changes from the original guide:
+# 1. All three components (DataPlatform, AIML, WebApp) now deploy via
+#    AzureRmWebAppDeployment@4 (Azure App Service Linux package deploy)
+#    instead of the original generic AzureCLI@2 / az staticwebapp calls.
+#      - DataPlatform -> ORT-Environment
+#      - AIML         -> DBG-Training
+#      - WebApp       -> Staging101
+# 2. Each deploy stage now has a "CheckChanges" step that inspects
+#    whether the component's folder actually changed since the last
+#    successful build. If not, it sets an output variable SkipStage,
+#    and the actual deployment task is skipped -- even if the
+#    component is "enabled" in release-config.yml.
 #
-# Prerequisites:
-# 1. The CI pipeline must be registered in Azure DevOps under the name
-#    referenced below (source: "LGWebApp-CI") -- rename to match your
-#    actual pipeline name if different.
-# 2. An Azure Resource Manager service connection ("Azure-ServiceConnection")
-#    with access to the target Web Apps.
-# 3. Three Web Apps already provisioned in Azure App Service:
-#    - DevWebApp (or your actual Dev app name)
-#    - TestWebApp (or your actual Test/UAT app name)
-#    - ProdWebApp (or your actual Prod app name)
-# 4. Three Azure DevOps Environments: "Dev", "Test", "Prod"
-#    (Pipelines > Environments) -- add approval checks on Test and Prod.
+# This means a component only deploys when BOTH are true:
+#   - it's enabled in release-config.yml, AND
+#   - its folder actually changed in this artifact
 # =====================================================================
 
-trigger: none   # this pipeline never runs on a direct push
+trigger: none
 
-# Automatically trigger when the CI pipeline completes successfully
+parameters:
+  - name: environment
+    displayName: "Target Environment"
+    type: string
+    default: "staging"
+    values:
+      - staging
+      - uat
+      - production
+
+  - name: dryRun
+    displayName: "Dry Run (validate only, no actual deployment)"
+    type: boolean
+    default: false
+
 resources:
-  pipelines:
-    - pipeline: Philip2BautistaV.SampleDotNet3 (37)
-      source: "Philip2BautistaV.SampleDotNet3"      # matches Pipelines > All in Azure DevOps
-      trigger:
-        branches:
-          include:
-            - develop
-            - release/*
-            - main
+  repositories:
+    - repository: coordinator
+      type: git
+      name: MyProject/release-coordinator
+      ref: refs/heads/main
 
-variables:
-  azureSubscription: 'Azure subscription 1'
-  devAppName: 'Staging101'
-  testAppName: 'ORT-Environment'
-  prodAppName: 'DBG-Training'
+  pipelines:
+    - pipeline: webapp-ci
+      project: MyProject
+      source: "WebApp-CI"
+      branch: main
+
+    - pipeline: dataplatform-ci
+      project: MyProject
+      source: "DataPlatform-CI"
+      branch: main
+
+    - pipeline: aiml-ci
+      project: MyProject
+      source: "AIML-CI"
+      branch: main
+
+pool:
+  vmImage: "ubuntu-latest"
 
 stages:
 
-  # ---------------------------------------------------------------
-  # Stage 1: Deploy to Dev
-  # Runs for: develop branch builds
-  # ---------------------------------------------------------------
-  - stage: DeployDev
-    displayName: 'Deploy to Dev'
-    condition: eq(variables['resources.pipeline.lgwebappCI.sourceBranch'], 'refs/heads/develop')
+  # -------------------------------------------------------------
+  # Stage 0: Read release-config.yml (unchanged from original)
+  # -------------------------------------------------------------
+  - stage: ValidateConfig
+    displayName: "Read Release Config"
     jobs:
-      - deployment: DeployToDev
-        displayName: 'Deploy LGWebApp to Dev'
-        environment: 'Dev'
-        pool:
-          vmImage: 'windows-latest'
+      - job: ReadConfig
+        steps:
+          - checkout: coordinator
+            path: coordinator
+
+          - task: PowerShell@2
+            displayName: "Parse release-config.yml and set component flags"
+            inputs:
+              targetType: inline
+              script: |
+                if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
+                  Install-Module powershell-yaml -Force -Scope CurrentUser
+                }
+                Import-Module powershell-yaml
+
+                $config = Get-Content "$(Pipeline.Workspace)/coordinator/release-config.yml" | ConvertFrom-Yaml
+                $release = $config.release
+
+                Write-Host "Release: $($release.name)"
+                Write-Host "Target environment: ${{ parameters.environment }}"
+
+                $dp  = $config.components.dataplatform.enabled
+                $ai  = $config.components.aiml.enabled
+                $web = $config.components.webapp.enabled
+
+                Write-Host "##vso[task.setvariable variable=dp_enabled;isOutput=true]$dp"
+                Write-Host "##vso[task.setvariable variable=ai_enabled;isOutput=true]$ai"
+                Write-Host "##vso[task.setvariable variable=web_enabled;isOutput=true]$web"
+
+                if (-not $dp -and -not $ai -and -not $web) {
+                  Write-Error "No components are enabled in release-config.yml. Nothing to deploy."
+                  exit 1
+                }
+            name: configOutput
+
+  # -------------------------------------------------------------
+  # Stage 1: DataPlatform -> Azure Web App "ORT-Environment"
+  # -------------------------------------------------------------
+  - stage: DeployDataPlatform
+    displayName: "Deploy DataPlatform"
+    dependsOn: ValidateConfig
+    condition: >
+      eq(stageDependencies.ValidateConfig.ReadConfig.outputs['configOutput.dp_enabled'], 'True')
+    variables:
+      ConnectedServiceName: '45138fee-3b39-4bda-bba3-d5461fad16ab'
+      WebAppKind: 'webApp'
+      WebAppName: 'ORT-Environment'
+    jobs:
+      - deployment: DataPlatformDeploy
+        environment: ${{ parameters.environment }}
         strategy:
           runOnce:
             deploy:
               steps:
                 - task: DownloadPipelineArtifact@2
-                  displayName: 'Download drop artifact'
+                  displayName: "Download DataPlatform artifact"
                   inputs:
-                    buildType: 'specific'
-                    project: '$(System.TeamProject)'
-                    definition: '$(resources.pipeline.lgwebappCI.pipelineID)'
-                    buildVersionToDownload: 'latestFromBranch'
-                    branchName: 'refs/heads/develop'
-                    artifactName: 'drop'
-                    targetPath: '$(Pipeline.Workspace)/drop'
+                    buildType: specific
+                    project: MyProject
+                    definition: $(resources.pipeline.dataplatform-ci.pipelineID)
+                    buildVersionToDownload: latestFromBranch
+                    branchName: refs/heads/main
+                    artifactName: dataplatform-drop
+                    targetPath: $(System.DefaultWorkingDirectory)/DataPlatform/drop
 
-                - task: AzureWebApp@1
-                  displayName: 'Deploy to Azure Web App - Dev'
+                - bash: |
+                    echo "Checking for changes in DataPlatform since last successful build..."
+                    LAST_SHA=$(cat $(System.DefaultWorkingDirectory)/DataPlatform/drop/last-successful-sha.txt 2>/dev/null || echo "")
+                    CURRENT_SHA=$(Build.SourceVersion)
+
+                    if [ -z "$LAST_SHA" ]; then
+                      echo "No previous successful SHA found -- treating as changed."
+                      SKIP="false"
+                    else
+                      CHANGED=$(git diff --name-only "$LAST_SHA" "$CURRENT_SHA" -- DataPlatform/ | wc -l)
+                      if [ "$CHANGED" -eq 0 ]; then
+                        echo "No changes detected under DataPlatform/ -- skipping deployment."
+                        SKIP="true"
+                      else
+                        echo "$CHANGED file(s) changed under DataPlatform/ -- proceeding with deployment."
+                        SKIP="false"
+                      fi
+                    fi
+                    echo "##vso[task.setvariable variable=SkipStage;isOutput=true]$SKIP"
+                  name: CheckChanges
+                  displayName: 'Check for changes in DataPlatform'
+
+                - task: AzureRmWebAppDeployment@4
+                  displayName: 'Deploy Azure App Service'
+                  condition: >
+                    and(
+                      ne(variables['CheckChanges.SkipStage'], 'true'),
+                      ne('${{ parameters.dryRun }}', 'true')
+                    )
                   inputs:
-                    azureSubscription: '$(azureSubscription)'
-                    appType: 'webApp'
-                    appName: '$(devAppName)'
-                    package: '$(Pipeline.Workspace)/drop/**/*.zip'
+                    azureSubscription: '$(ConnectedServiceName)'
+                    appType: '$(WebAppKind)'
+                    WebAppName: '$(WebAppName)'
+                    packageForLinux: '$(System.DefaultWorkingDirectory)/DataPlatform/drop/s.zip'
 
-  # ---------------------------------------------------------------
-  # Stage 2: Deploy to Test/UAT
-  # Runs for: release/* branch builds
-  # Requires: approval configured on the "Test" Environment
-  # ---------------------------------------------------------------
-  - stage: DeployTest
-    displayName: 'Deploy to Test/UAT'
-    dependsOn: []   # not dependent on Dev -- release/* skips straight here
-    condition: eq(variables['resources.pipeline.lgwebappCI.sourceBranch'], 'refs/heads/release')
+  # -------------------------------------------------------------
+  # Stage 2: AIML -> Azure Web App "DBG-Training"
+  # -------------------------------------------------------------
+  - stage: DeployAIML
+    displayName: "Deploy AIML Pipeline"
+    dependsOn:
+      - ValidateConfig
+      - DeployDataPlatform
+    condition: >
+      and(
+        in(dependencies.DeployDataPlatform.result, 'Succeeded', 'Skipped'),
+        eq(stageDependencies.ValidateConfig.ReadConfig.outputs['configOutput.ai_enabled'], 'True')
+      )
+    variables:
+      ConnectedServiceName: '45138fee-3b39-4bda-bba3-d5461fad16ab'
+      WebAppKind: 'webApp'
+      WebAppName: 'DBG-Training'
     jobs:
-      - deployment: DeployToTest
-        displayName: 'Deploy LGWebApp to Test/UAT'
-        environment: 'Test'    # <-- approval gate lives here
-        pool:
-          vmImage: 'windows-latest'
+      - deployment: AIMLDeploy
+        environment: ${{ parameters.environment }}
         strategy:
           runOnce:
             deploy:
               steps:
                 - task: DownloadPipelineArtifact@2
-                  displayName: 'Download drop artifact'
+                  displayName: "Download AIML artifact"
                   inputs:
-                    buildType: 'specific'
-                    project: '$(System.TeamProject)'
-                    definition: '$(resources.pipeline.lgwebappCI.pipelineID)'
-                    buildVersionToDownload: 'latestFromBranch'
-                    branchName: '$(resources.pipeline.lgwebappCI.sourceBranch)'
-                    artifactName: 'drop'
-                    targetPath: '$(Pipeline.Workspace)/drop'
+                    buildType: specific
+                    project: MyProject
+                    definition: $(resources.pipeline.aiml-ci.pipelineID)
+                    buildVersionToDownload: latestFromBranch
+                    branchName: refs/heads/main
+                    artifactName: aiml-drop
+                    targetPath: $(System.DefaultWorkingDirectory)/AIML/drop
 
-                - task: AzureWebApp@1
-                  displayName: 'Deploy to Azure Web App - Test'
+                - bash: |
+                    echo "Checking for changes in AIML since last successful build..."
+                    LAST_SHA=$(cat $(System.DefaultWorkingDirectory)/AIML/drop/last-successful-sha.txt 2>/dev/null || echo "")
+                    CURRENT_SHA=$(Build.SourceVersion)
+
+                    if [ -z "$LAST_SHA" ]; then
+                      echo "No previous successful SHA found -- treating as changed."
+                      SKIP="false"
+                    else
+                      CHANGED=$(git diff --name-only "$LAST_SHA" "$CURRENT_SHA" -- AIML/ | wc -l)
+                      if [ "$CHANGED" -eq 0 ]; then
+                        echo "No changes detected under AIML/ -- skipping deployment."
+                        SKIP="true"
+                      else
+                        echo "$CHANGED file(s) changed under AIML/ -- proceeding with deployment."
+                        SKIP="false"
+                      fi
+                    fi
+                    echo "##vso[task.setvariable variable=SkipStage;isOutput=true]$SKIP"
+                  name: CheckChanges
+                  displayName: 'Check for changes in AIML'
+
+                - task: AzureRmWebAppDeployment@4
+                  displayName: 'Deploy Azure App Service'
+                  condition: >
+                    and(
+                      ne(variables['CheckChanges.SkipStage'], 'true'),
+                      ne('${{ parameters.dryRun }}', 'true')
+                    )
                   inputs:
-                    azureSubscription: '$(azureSubscription)'
-                    appType: 'webApp'
-                    appName: '$(testAppName)'
-                    package: '$(Pipeline.Workspace)/drop/**/*.zip'
+                    azureSubscription: '$(ConnectedServiceName)'
+                    appType: '$(WebAppKind)'
+                    WebAppName: '$(WebAppName)'
+                    packageForLinux: '$(System.DefaultWorkingDirectory)/AIML/drop/s.zip'
 
-  # ---------------------------------------------------------------
-  # Stage 3: Deploy to Prod
-  # Runs for: main branch builds only
-  # Requires: approval configured on the "Prod" Environment
-  # ---------------------------------------------------------------
-  - stage: DeployProd
-    displayName: 'Deploy to Production'
-    dependsOn: []   # main is deployed independently of Dev/Test stage runs
-    condition: eq(variables['resources.pipeline.lgwebappCI.sourceBranch'], 'refs/heads/main')
+  # -------------------------------------------------------------
+  # Stage 3: WebApp — unchanged from original guide (no new
+  # variables/task were provided for this component)
+  # -------------------------------------------------------------
+  - stage: DeployWebApp
+    displayName: "Deploy WebApp (React + API)"
+    dependsOn:
+      - ValidateConfig
+      - DeployDataPlatform
+      - DeployAIML
+    condition: >
+      and(
+        in(dependencies.DeployDataPlatform.result, 'Succeeded', 'Skipped'),
+        in(dependencies.DeployAIML.result, 'Succeeded', 'Skipped'),
+        eq(stageDependencies.ValidateConfig.ReadConfig.outputs['configOutput.web_enabled'], 'True')
+      )
+    variables:
+      ConnectedServiceName: '45138fee-3b39-4bda-bba3-d5461fad16ab'
+      WebAppKind: 'webApp'
+      WebAppName: 'Staging101'
     jobs:
-      - deployment: DeployToProd
-        displayName: 'Deploy LGWebApp to Prod'
-        environment: 'Prod'   # <-- approval gate lives here
-        pool:
-          vmImage: 'windows-latest'
+      - deployment: WebAppDeploy
+        environment: ${{ parameters.environment }}
         strategy:
           runOnce:
             deploy:
               steps:
                 - task: DownloadPipelineArtifact@2
-                  displayName: 'Download drop artifact'
+                  displayName: "Download WebApp artifact"
                   inputs:
-                    buildType: 'specific'
-                    project: '$(System.TeamProject)'
-                    definition: '$(resources.pipeline.lgwebappCI.pipelineID)'
-                    buildVersionToDownload: 'latestFromBranch'
-                    branchName: 'refs/heads/main'
-                    artifactName: 'drop'
-                    targetPath: '$(Pipeline.Workspace)/drop'
+                    buildType: specific
+                    project: MyProject
+                    definition: $(resources.pipeline.webapp-ci.pipelineID)
+                    buildVersionToDownload: latestFromBranch
+                    branchName: refs/heads/main
+                    artifactName: webapp-drop
+                    targetPath: $(System.DefaultWorkingDirectory)/WebApp/drop
 
-                - task: AzureWebApp@1
-                  displayName: 'Deploy to Azure Web App - Prod'
+                - bash: |
+                    echo "Checking for changes in WebApp since last successful build..."
+                    LAST_SHA=$(cat $(System.DefaultWorkingDirectory)/WebApp/drop/last-successful-sha.txt 2>/dev/null || echo "")
+                    CURRENT_SHA=$(Build.SourceVersion)
+
+                    if [ -z "$LAST_SHA" ]; then
+                      echo "No previous successful SHA found -- treating as changed."
+                      SKIP="false"
+                    else
+                      CHANGED=$(git diff --name-only "$LAST_SHA" "$CURRENT_SHA" -- WebApp/ | wc -l)
+                      if [ "$CHANGED" -eq 0 ]; then
+                        echo "No changes detected under WebApp/ -- skipping deployment."
+                        SKIP="true"
+                      else
+                        echo "$CHANGED file(s) changed under WebApp/ -- proceeding with deployment."
+                        SKIP="false"
+                      fi
+                    fi
+                    echo "##vso[task.setvariable variable=SkipStage;isOutput=true]$SKIP"
+                  name: CheckChanges
+                  displayName: 'Check for changes in WebApp'
+
+                - task: AzureRmWebAppDeployment@4
+                  displayName: 'Deploy Azure App Service'
+                  condition: >
+                    and(
+                      ne(variables['CheckChanges.SkipStage'], 'true'),
+                      ne('${{ parameters.dryRun }}', 'true')
+                    )
                   inputs:
-                    azureSubscription: '$(azureSubscription)'
-                    appType: 'webApp'
-                    appName: '$(prodAppName)'
-                    package: '$(Pipeline.Workspace)/drop/**/*.zip'
+                    azureSubscription: '$(ConnectedServiceName)'
+                    appType: '$(WebAppKind)'
+                    WebAppName: '$(WebAppName)'
+                    packageForLinux: '$(System.DefaultWorkingDirectory)/WebApp/drop/s.zip'
