@@ -26,7 +26,7 @@ trigger: none   # this pipeline never runs on a direct push
 # Automatically trigger when the CI pipeline completes successfully
 resources:
   pipelines:
-    - pipeline: lgwebappCI
+    - pipeline: Philip2BautistaV.SampleDotNet3 (37)
       source: "Philip2BautistaV.SampleDotNet3"      # matches Pipelines > All in Azure DevOps
       trigger:
         branches:
