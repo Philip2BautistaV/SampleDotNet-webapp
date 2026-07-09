@@ -1,0 +1,156 @@
+# =====================================================================
+# CD pipeline: Deploy LGWebApp (drop artifact) to Dev -> Test/UAT -> Prod
+#
+# Companion to the CI pipeline (azure-pipelines-ci.yml) which builds,
+# publishes, and stages the 'drop' artifact. This pipeline does NOT
+# rebuild anything -- it downloads that artifact and deploys the same
+# binaries through each environment, using Azure DevOps Environments
+# for approval gates between stages.
+#
+# Prerequisites:
+# 1. The CI pipeline must be registered in Azure DevOps under the name
+#    referenced below (source: "LGWebApp-CI") -- rename to match your
+#    actual pipeline name if different.
+# 2. An Azure Resource Manager service connection ("Azure-ServiceConnection")
+#    with access to the target Web Apps.
+# 3. Three Web Apps already provisioned in Azure App Service:
+#    - DevWebApp (or your actual Dev app name)
+#    - TestWebApp (or your actual Test/UAT app name)
+#    - ProdWebApp (or your actual Prod app name)
+# 4. Three Azure DevOps Environments: "Dev", "Test", "Prod"
+#    (Pipelines > Environments) -- add approval checks on Test and Prod.
+# =====================================================================
+
+trigger: none   # this pipeline never runs on a direct push
+
+# Automatically trigger when the CI pipeline completes successfully
+resources:
+  pipelines:
+    - pipeline: lgwebappCI
+      source: "Philip2BautistaV.SampleDotNet3"      # matches Pipelines > All in Azure DevOps
+      trigger:
+        branches:
+          include:
+            - develop
+            - release/*
+            - main
+
+variables:
+  azureSubscription: 'Azure subscription 1'
+  devAppName: 'Staging101'
+  testAppName: 'ORT-Environment'
+  prodAppName: 'DBG-Training'
+
+stages:
+
+  # ---------------------------------------------------------------
+  # Stage 1: Deploy to Dev
+  # Runs for: develop branch builds
+  # ---------------------------------------------------------------
+  - stage: DeployDev
+    displayName: 'Deploy to Dev'
+    condition: eq(resources.pipeline.lgwebappCI.sourceBranch, 'refs/heads/develop')
+    jobs:
+      - deployment: DeployToDev
+        displayName: 'Deploy LGWebApp to Dev'
+        environment: 'Dev'
+        pool:
+          vmImage: 'windows-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download drop artifact'
+                  inputs:
+                    buildType: 'specific'
+                    project: '$(System.TeamProject)'
+                    definition: '$(resources.pipeline.lgwebappCI.pipelineID)'
+                    buildVersionToDownload: 'latestFromBranch'
+                    branchName: 'refs/heads/develop'
+                    artifactName: 'drop'
+                    targetPath: '$(Pipeline.Workspace)/drop'
+
+                - task: AzureWebApp@1
+                  displayName: 'Deploy to Azure Web App - Dev'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    appType: 'webApp'
+                    appName: '$(devAppName)'
+                    package: '$(Pipeline.Workspace)/drop/**/*.zip'
+
+  # ---------------------------------------------------------------
+  # Stage 2: Deploy to Test/UAT
+  # Runs for: release/* branch builds
+  # Requires: approval configured on the "Test" Environment
+  # ---------------------------------------------------------------
+  - stage: DeployTest
+    displayName: 'Deploy to Test/UAT'
+    dependsOn: []   # not dependent on Dev -- release/* skips straight here
+    condition: startsWith(resources.pipeline.lgwebappCI.sourceBranch, 'refs/heads/release/')
+    jobs:
+      - deployment: DeployToTest
+        displayName: 'Deploy LGWebApp to Test/UAT'
+        environment: 'Test'    # <-- approval gate lives here
+        pool:
+          vmImage: 'windows-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download drop artifact'
+                  inputs:
+                    buildType: 'specific'
+                    project: '$(System.TeamProject)'
+                    definition: '$(resources.pipeline.lgwebappCI.pipelineID)'
+                    buildVersionToDownload: 'latestFromBranch'
+                    branchName: '$(resources.pipeline.lgwebappCI.sourceBranch)'
+                    artifactName: 'drop'
+                    targetPath: '$(Pipeline.Workspace)/drop'
+
+                - task: AzureWebApp@1
+                  displayName: 'Deploy to Azure Web App - Test'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    appType: 'webApp'
+                    appName: '$(testAppName)'
+                    package: '$(Pipeline.Workspace)/drop/**/*.zip'
+
+  # ---------------------------------------------------------------
+  # Stage 3: Deploy to Prod
+  # Runs for: main branch builds only
+  # Requires: approval configured on the "Prod" Environment
+  # ---------------------------------------------------------------
+  - stage: DeployProd
+    displayName: 'Deploy to Production'
+    dependsOn: []   # main is deployed independently of Dev/Test stage runs
+    condition: eq(resources.pipeline.lgwebappCI.sourceBranch, 'refs/heads/main')
+    jobs:
+      - deployment: DeployToProd
+        displayName: 'Deploy LGWebApp to Prod'
+        environment: 'Prod'   # <-- approval gate lives here
+        pool:
+          vmImage: 'windows-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download drop artifact'
+                  inputs:
+                    buildType: 'specific'
+                    project: '$(System.TeamProject)'
+                    definition: '$(resources.pipeline.lgwebappCI.pipelineID)'
+                    buildVersionToDownload: 'latestFromBranch'
+                    branchName: 'refs/heads/main'
+                    artifactName: 'drop'
+                    targetPath: '$(Pipeline.Workspace)/drop'
+
+                - task: AzureWebApp@1
+                  displayName: 'Deploy to Azure Web App - Prod'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    appType: 'webApp'
+                    appName: '$(prodAppName)'
+                    package: '$(Pipeline.Workspace)/drop/**/*.zip'
