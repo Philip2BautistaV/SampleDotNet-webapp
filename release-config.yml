@@ -1,0 +1,38 @@
+# release-config.yml
+#
+# Edit the 'enabled' flags (and, per release, the 'branch' values) to define
+# which components are in scope and which branch each one deploys from.
+# The orchestrator pipeline (release-coordinator.yml) reads this file at
+# runtime and skips any disabled components — no changes to the pipeline
+# YAML itself are needed between releases.
+#
+# The deployment sequence (DataPlatform > AIML > WebApp) is enforced by the
+# pipeline's stage dependencies regardless of which components are enabled.
+
+release:
+  name: "Release 1.0 — WebApp MVP"
+  targetEnvironment: "Staging101"          # staging | uat | production
+
+components:
+  dataplatform:
+    enabled: false                         # Set to true when DB/Fabric changes are in scope
+    pipelineName: "DataPlatform-CI"        # Must match resources.pipelines[].source in release-coordinator.yml
+    branch: "refs/heads/release/1.0"       # Exact branch only. Wildcards (e.g. release/*) are NOT supported —
+                                            # neither by the pipeline resource resolver nor by
+                                            # DownloadPipelineArtifact@2. Update this each release to the
+                                            # actual release branch you want deployed.
+    artifactName: "dataplatform-drop"
+
+  aiml:
+    enabled: true                          # Set to true when ML pipeline changes are in scope
+    pipelineName: "AIML-CI"
+    branch: "refs/heads/main"
+    artifactName: "aiml-drop"
+    note: "AIML always deploys after DataPlatform when both are enabled"
+
+  webapp:
+    enabled: false                         # Set to true when WebApp changes are in scope
+    pipelineName: "WebApp-CI"
+    branch: "refs/heads/develop"
+    artifactName: "webapp-drop"
+    note: "WebApp always deploys last — it is the consumer of all upstream components"
