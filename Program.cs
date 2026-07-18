@@ -1,6 +1,6 @@
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-app.MapGet("/", () => "Webapp deployment on Thursday");
+app.MapGet("/", () => "Webapp deployment in Production");
 
 app.Run();
